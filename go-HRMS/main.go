@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/logger"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -21,13 +23,25 @@ type MongoInstance struct {
 var mg MongoInstance
 
 const dbName = "fiber-hrms"
-const mongoURL = "mongodb://localhost:27017" // or use a connection string when connecting to online services
+
+// mongoURL now comes from the MONGO_URI environment variable so the same
+// binary works locally and in production. If the variable isn't set, we
+// fall back to the original local default so nothing breaks for local dev.
+var mongoURL = getEnv("MONGO_URI", "mongodb://localhost:27017")
+
+// getEnv reads an environment variable, or returns a fallback if it's unset.
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
+}
 
 type Employee struct {
 	ID     primitive.ObjectID `json:"id,omitempty" bson:"_id,omitempty"`
 	Name   string             `json:"name"`
 	Salary float64            `json:"salary"`
-	Age    float64            `json:"age"`
+	Age    int                `json:"age"` // was float64 — age should be a whole number
 }
 
 func Connect() error {
@@ -62,15 +76,22 @@ func main() {
 
 	app := fiber.New()
 
+	// Logs every request (method, path, status, latency) to stdout.
+	app.Use(logger.New())
+
 	app.Get("/employee", func(c fiber.Ctx) error {
-		cursor, err := mg.DB.Collection("employees").Find(c.Context(), bson.D{})
+		// Give every DB call a timeout so a stuck DB can't hang the request forever.
+		ctx, cancel := context.WithTimeout(c.Context(), 5*time.Second)
+		defer cancel()
+
+		cursor, err := mg.DB.Collection("employees").Find(ctx, bson.D{})
 		if err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
 
 		var employee []Employee = make([]Employee, 0)
 
-		if err := cursor.All(c.Context(), &employee); err != nil {
+		if err := cursor.All(ctx, &employee); err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
 
@@ -78,9 +99,28 @@ func main() {
 
 	})
 
-	// app.Get("/employee/{id}", func(c fiber.Ctx) error {
+	app.Get("/employee/:id", func(c fiber.Ctx) error {
+		employeeID, err := primitive.ObjectIDFromHex(c.Params("id"))
+		if err != nil {
+			return c.Status(400).SendString(err.Error())
+		}
 
-	// })
+		ctx, cancel := context.WithTimeout(c.Context(), 5*time.Second)
+		defer cancel()
+
+		query := bson.D{{Key: "_id", Value: employeeID}}
+
+		employee := new(Employee)
+		err = mg.DB.Collection("employees").FindOne(ctx, query).Decode(employee)
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				return c.Status(404).SendString("employee not found")
+			}
+			return c.Status(500).SendString(err.Error())
+		}
+
+		return c.Status(200).JSON(employee)
+	})
 
 	app.Post("/employee", func(c fiber.Ctx) error {
 		collection := mg.DB.Collection("employees")
@@ -91,7 +131,21 @@ func main() {
 			return c.Status(400).SendString(err.Error())
 		}
 
-		insertResult, err := collection.InsertOne(c.Context(), employee)
+		// Basic sanity checks so obviously-bad data can't be inserted.
+		if employee.Name == "" {
+			return c.Status(400).SendString("name is required")
+		}
+		if employee.Salary < 0 {
+			return c.Status(400).SendString("salary cannot be negative")
+		}
+		if employee.Age <= 0 {
+			return c.Status(400).SendString("age must be greater than 0")
+		}
+
+		ctx, cancel := context.WithTimeout(c.Context(), 5*time.Second)
+		defer cancel()
+
+		insertResult, err := collection.InsertOne(ctx, employee)
 		if err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
@@ -101,7 +155,7 @@ func main() {
 		return c.Status(201).JSON(employee)
 	})
 
-	app.Put("/employee/{id}", func(c fiber.Ctx) error {
+	app.Put("/employee/:id", func(c fiber.Ctx) error {
 		employeeID, err := primitive.ObjectIDFromHex(c.Params("id"))
 		if err != nil {
 			return c.Status(400).SendString(err.Error())
@@ -111,6 +165,19 @@ func main() {
 		if err := c.Bind().Body(employee); err != nil {
 			return c.Status(400).SendString(err.Error())
 		}
+
+		if employee.Name == "" {
+			return c.Status(400).SendString("name is required")
+		}
+		if employee.Salary < 0 {
+			return c.Status(400).SendString("salary cannot be negative")
+		}
+		if employee.Age <= 0 {
+			return c.Status(400).SendString("age must be greater than 0")
+		}
+
+		ctx, cancel := context.WithTimeout(c.Context(), 5*time.Second)
+		defer cancel()
 
 		query := bson.D{{Key: "_id", Value: employeeID}}
 
@@ -122,7 +189,7 @@ func main() {
 			}},
 		}
 
-		err = mg.DB.Collection("employees").FindOneAndUpdate(c.Context(), query, update).Err()
+		err = mg.DB.Collection("employees").FindOneAndUpdate(ctx, query, update).Err()
 		if err != nil {
 			if err == mongo.ErrNoDocuments {
 				return c.Status(404).SendString("employee not found")
@@ -141,8 +208,11 @@ func main() {
 			return c.Status(400).SendString(err.Error())
 		}
 
+		ctx, cancel := context.WithTimeout(c.Context(), 5*time.Second)
+		defer cancel()
+
 		query := bson.D{{Key: "_id", Value: employeeID}}
-		result, err := mg.DB.Collection("employees").DeleteOne(c.Context(), &query)
+		result, err := mg.DB.Collection("employees").DeleteOne(ctx, &query)
 		if err != nil {
 			return c.Status(500).SendString(err.Error())
 		}
