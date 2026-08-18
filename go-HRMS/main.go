@@ -24,9 +24,7 @@ var mg MongoInstance
 
 const dbName = "fiber-hrms"
 
-// mongoURL now comes from the MONGO_URI environment variable so the same
-// binary works locally and in production. If the variable isn't set, we
-// fall back to the original local default so nothing breaks for local dev.
+// mongoURL comes from the MONGO_URI environment variable
 var mongoURL = getEnv("MONGO_URI", "mongodb://localhost:27017")
 
 // getEnv reads an environment variable, or returns a fallback if it's unset.
@@ -41,7 +39,7 @@ type Employee struct {
 	ID     primitive.ObjectID `json:"id,omitempty" bson:"_id,omitempty"`
 	Name   string             `json:"name"`
 	Salary float64            `json:"salary"`
-	Age    int                `json:"age"` // was float64 — age should be a whole number
+	Age    int                `json:"age"`
 }
 
 func Connect() error {
